@@ -1,0 +1,144 @@
+import hashlib
+import math
+from collections import defaultdict
+import base58
+import coincurve
+
+class WalletAddressAnalyzer:
+    def __init__(self, address):
+        self.address = address
+        self.hash160 = self.decode_address_to_hash160(address)
+
+    def decode_address_to_hash160(self, address):
+        """Decode a base58 Bitcoin address to its hash160"""
+        decoded = base58.b58decode_check(address)
+        return decoded[1:]
+
+    def calculate_hex_ranges(self, hash160_hex):
+        """Calculate precise hex ranges for the address"""
+        padded_hash = hash160_hex.zfill(64)
+        current_value = int(padded_hash, 16)
+
+        ranges = {
+            'current': current_value,
+            'previous': current_value - 1,
+            'next': current_value + 1,
+            'range_start': current_value,
+            'range_end': int('f' * (64 - len(hash160_hex)) + hash160_hex, 16)
+        }
+        return ranges
+
+    def validate_hex_range(self, start_key, end_key):
+        """Validate and adjust the start and end keys to be within valid range"""
+        if start_key >= end_key:
+            raise ValueError("Invalid range. Start key must be less than end key.")
+        
+        max_valid_hex = int('f' * 64, 16)
+        if start_key < 0 or start_key > max_valid_hex:
+            start_key = max(0, min(start_key, max_valid_hex))
+        
+        if end_key < 0 or end_key > max_valid_hex:
+            end_key = max(0, min(end_key, max_valid_hex))
+        
+        return start_key, end_key
+
+    def bsgs_search(self, target_address, start_key, end_key, step_size):
+        """Baby-step Giant-step search algorithm"""
+        start_key, end_key = self.validate_hex_range(start_key, end_key)
+        m = math.isqrt(end_key - start_key)
+        baby_steps = defaultdict(list)
+
+        # Baby-step phase: store addresses for m small steps
+        print(f"Generating {m} baby steps...")
+        for i in range(m):
+            private_key = start_key + i
+            public_key = self.generate_pubkey(private_key)
+            address = self.pubkey_to_address(public_key)
+            baby_steps[address].append(private_key)
+
+        # Giant-step phase: search using larger steps
+        print("Starting giant steps...")
+        for j in range(m):
+            current_key = start_key + j * m
+            public_key = self.generate_pubkey(current_key)
+            address = self.pubkey_to_address(public_key)
+
+            # Check if the address matches the target
+            if address == target_address:
+                print(f"Found match! Private key: {hex(current_key)} corresponds to the target address: {target_address}")
+                return current_key
+
+            # Check baby steps for possible matches
+            if address in baby_steps:
+                for baby_private_key in baby_steps[address]:
+                    combined_key = current_key + baby_private_key
+                    print(f"Found match in baby steps! Private key: {hex(combined_key)}")
+                    return combined_key
+
+        print("No match found in the specified key range.")
+        return None
+
+    def find_closest_range(self, target_address, start_key, end_key):
+        """Find the closest matching range to the target address"""
+        closest_range = None
+        min_distance = float('inf')
+
+        for key in range(start_key, end_key + 1):
+            public_key = self.generate_pubkey(key)
+            address = self.pubkey_to_address(public_key)
+            distance = self.calculate_distance(address, target_address)
+
+            if distance < min_distance:
+                min_distance = distance
+                closest_range = key
+
+        return closest_range
+
+    def calculate_distance(self, address1, address2):
+        """Calculate a simple distance metric between two addresses"""
+        return sum(1 for a, b in zip(address1, address2) if a != b)
+
+    def pubkey_to_address(self, public_key_bytes):
+        """Generate a Bitcoin address from a public key"""
+        sha256_hash = hashlib.sha256(public_key_bytes).digest()
+        ripemd160_hash = hashlib.new('ripemd160', sha256_hash).digest()
+
+        # Add network byte (0x00 for mainnet)
+        network_byte = b'\x00' + ripemd160_hash
+
+        # Perform double SHA256 for checksum
+        checksum = hashlib.sha256(hashlib.sha256(network_byte).digest()).digest()[:4]
+
+        # Final address is base58 encoding of the network byte + checksum
+        address_bytes = network_byte + checksum
+        return base58.b58encode(address_bytes).decode()
+
+    def generate_pubkey(self, private_key_int):
+        """Generate a public key from a private key"""
+        private_key_bytes = private_key_int.to_bytes(32, 'big')
+        private_key = coincurve.PrivateKey(private_key_bytes)
+        return private_key.public_key.format(compressed=True)
+
+
+if __name__ == "__main__":
+    target_address = input("Enter target Bitcoin address: ").strip()
+    start_key = int(input("Enter start key (in hex): "), 16)
+    end_key = int(input("Enter end key (in hex): "), 16)
+    step_size = int(input("Enter step size: "))
+
+    analyzer = WalletAddressAnalyzer(target_address)
+    print("Finding the closest matching range...")
+    closest_range = analyzer.find_closest_range(target_address, start_key, end_key)
+    if closest_range:
+        print(f"Closest matching range starts with private key: {hex(closest_range)}")
+        new_start_key = max(closest_range - step_size, 0)
+        new_end_key = closest_range + step_size
+
+        print(f"New range: {hex(new_start_key)} to {hex(new_end_key)}")
+        found_key = analyzer.bsgs_search(target_address, new_start_key, new_end_key, step_size)
+        if found_key:
+            print(f"Private key found: {hex(found_key)}")
+        else:
+            print("No match found in the refined range.")
+    else:
+        print("No close match found.")
